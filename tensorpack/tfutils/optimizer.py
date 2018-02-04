@@ -203,7 +203,7 @@ class AccumGradOptimizerAlt(ProxyOptimizer):
     def apply_gradients(self, *args, **kwargs):
         with tf.name_scope('apply_gradients'):
             # update weight
-            update_op = self._opt.apply_gradients(grads_and_vars, global_step)
+            update_op = self._opt.apply_gradients(*args, **kwargs)
             with tf.control_dependencies([update_op]):
                 # clear slot
                 clear_ops = [tf.assign(s, tf.zeros_like(s)) for s in self._accum_slots]
