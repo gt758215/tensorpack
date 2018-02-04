@@ -199,33 +199,28 @@ class AccumGradOptimizerAlt(ProxyOptimizer):
         #trainable_var += ops.get_collection(ops.GraphKeys._STREAMING_MODEL_PORTS)
 
         # slots
-        self._accum_slots = self._create_accum_slots(trainable_var)
-
-        # ==================================
-        # clear grads lambda
-        def grads_clear():
-            clear_ops = [tf.assign(s, tf.zeros_like(s)) for s in self._accum_slots]
-            return tf.group(*clear_ops, name='clear_grads')
-        # ===================================
-
-        with tf.control_dependencies([self._update_counter]):
-            cond_clear_grads = tf.cond(tf.equal(self._counter, 1), grads_clear, tf.no_op, name='cond_clear_grads')
+        accum_slots = self._create_accum_slots(trainable_var)
 
         grads_and_vars = self._opt.compute_gradients(*args, **kwargs)
-  
-        self._grads = [g for g, _ in grads_and_vars]
 
-        with tf.control_dependencies([cond_clear_grads]):
-            self._accum_grads = [tf.assign_add(s, tf.divide(g, self._niter)) for s, (g, _) in zip(self._accum_slots, grads_and_vars)]
-            return zip(self._accum_grads, trainable_var)
+        accum_grads = [tf.assign_add(s, tf.divide(g, self._niter)) for s, (g, _) in zip(accum_slots, grads_and_vars)]
+        return zip(accum_grads, trainable_var)
+
+    #def apply_gradients(self, *args, **kwargs):
+    #    def update_grad():
+    #        update_op = self._opt.apply_gradients(*args, **kwargs)
+    #        return update_op
+
+    #    return tf.cond(self._pred, update_grad, tf.no_op, name='cond_apply_gradients')
 
     def apply_gradients(self, *args, **kwargs):
-        def update_grad():
-            update_op = self._opt.apply_gradients(*args, **kwargs)
-            return update_op
-
-        return tf.cond(self._pred, update_grad, tf.no_op, name='cond_apply_gradients')
-
+        with tf.name_scope('apply_gradients'):
+            # update weight
+            update_op = self._opt.apply_gradients(grads_and_vars, global_step)
+            with tf.control_dependencies([update_op]):
+                # clear slot
+                clear_ops = [tf.assign(s, tf.zeros_like(s)) for s in self._accum_slots]
+        return tf.group(*clear_ops, name='update_grad')
 
 class AccumGradOptimizer(ProxyOptimizer):
     """
