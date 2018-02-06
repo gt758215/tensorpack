@@ -190,12 +190,6 @@ class SyncMultiGPUReplicatedBuilder(DataParallelBuilder):
             use_vs=[False] + [True] * (len(self.towers) - 1))
 
         DataParallelBuilder._check_grad_list(grad_list)
-        
-        grad_ops = []
-        for gvs in zip(*grad_list):
-            for g, _ in gvs:
-                grad_ops.append(g)
-
         grads = allreduce_grads(grad_list)
 
         train_ops = []
@@ -206,11 +200,9 @@ class SyncMultiGPUReplicatedBuilder(DataParallelBuilder):
                 with override_to_local_variable(enable=idx > 0):
                     train_ops.append(opt.apply_gradients(
                         grad_and_vars, name='apply_grad_{}'.format(idx)))
-
         train_op = tf.group(*train_ops, name='train_op')
-        accum_op = tf.group(*grad_ops, name='accum_op')
         post_init_op = SyncMultiGPUReplicatedBuilder.get_post_init_ops()
-        return train_op, post_init_op, accum_op
+        return train_op, post_init_op
 
 # Adopt from https://github.com/tensorflow/benchmarks/blob/master/scripts/tf_cnn_benchmarks/variable_mgr.py
     @staticmethod
