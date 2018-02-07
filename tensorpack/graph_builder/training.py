@@ -12,6 +12,7 @@ from ..tfutils.tower import TowerContext
 from ..tfutils.common import get_tf_version_number
 from ..tfutils.gradproc import ScaleGradient
 
+from .utils import allreduce_grads2
 from .utils import (
     LeastLoadedDeviceSetter, override_to_local_variable,
     allreduce_grads, average_grads)
@@ -190,11 +191,27 @@ class SyncMultiGPUReplicatedBuilder(DataParallelBuilder):
             use_vs=[False] + [True] * (len(self.towers) - 1))
 
         DataParallelBuilder._check_grad_list(grad_list)
-        grads = allreduce_grads(grad_list)
+        opt = get_opt_fn()
+
+        #grads_org = [[g for g, _ in gvs] for gvs in grad_list]
+        vars_org = [[v for _, v in gvs] for gvs in grad_list]
+
+        #grads = opt.run_or_not(grads_nccl, grads_org)
+        if hasattr(opt, 'run_or_not'): grads_vars_nccl = opt.run_or_not(allreduce_grads2, grad_list)
+        else: grads_vars_nccl = allreduce_grads(grad_list)
+        grads_nccl = [[g for g, _ in gvs] for gvs in grads_vars_nccl]
+
+        grads_new = []
+        for gs, vs in zip(grads_nccl, vars_org):
+            tmp = []
+            for g , v in zip(gs, vs):
+                tmp.append((g, v))
+            grads_new.append(tmp)
+            #grads_new.append([(g, v) for g, v in zip(gs, vs)])
 
         train_ops = []
-        opt = get_opt_fn()
-        for idx, grad_and_vars in enumerate(grads):
+        for idx, grad_and_vars in enumerate(grads_new):
+        #for idx, grad_and_vars in enumerate(grads):
             with tf.device(raw_devices[idx]):
                 # apply_gradients may create variables. Make them LOCAL_VARIABLES
                 with override_to_local_variable(enable=idx > 0):
