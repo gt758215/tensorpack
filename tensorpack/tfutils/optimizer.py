@@ -130,15 +130,13 @@ class VariableAssignmentOptimizer(PostProcessOptimizer):
 
 class AccumGradOptimizerAlt(ProxyOptimizer):
     """
-    An optimizer which accumulates gradients across :
-    All operator between compute_gradients and apply_gradients must
-    apply follow function: run_or_not(ok, no)
-    ex: 
-    grads = allreduce_grads(accum_grad_list)
-    =>
-    with tf.control_dependencies([accum_grad_list]):
-        grads = run_or_not(allreduce_grads(accum_grad_list), accum_grad_list[0])
-    
+    An optimizer which accumulates gradients across :math:`k` :meth:`minimize` calls,
+    and apply them together in every :math:`k`th :meth:`minimize` call.
+    This is equivalent to using a :math:`k` times larger batch size plus a
+    :math:`k` times larger learning rate, but uses much less memory.
+
+    Note that this implementation may not support all models.
+    E.g., it doesn't support sparse gradient update.
     """
 
     def __init__(self, opt, niter=1):
@@ -149,28 +147,6 @@ class AccumGradOptimizerAlt(ProxyOptimizer):
         """
         super(AccumGradOptimizerAlt, self).__init__(opt, 'AccumGrad')
         self._niter = int(niter)
-
-        with tf.variable_scope(tf.get_variable_scope()):
-            self._counter = tf.Variable(0, name="counter", trainable=False, dtype=tf.int32)
-        # ==================================
-        # update counter lambda
-        def counter_add():
-          return tf.assign_add(self._counter, 1)
-        def counter_reset():
-          return tf.assign(self._counter, 1)
-        # ==================================
-        self._update_counter = tf.cond(tf.equal(self._counter, self._niter), counter_reset, counter_add, name='update_counter')
-        with tf.control_dependencies([self._update_counter]):
-            self._pred = tf.equal(self._counter, self._niter)
-
-    def _create_accum_slots(self, var_list):
-        org = tf.get_variable_scope().reuse
-        tf.get_variable_scope()._reuse = tf.AUTO_REUSE
-
-        slots = [self._zeros_slot(v, "accum_grad", self._name) for v in  var_list]
-
-        tf.get_variable_scope()._reuse = org
-        return slots
 
     def compute_gradients(self, *args, **kwargs):
         # get trainalbe variable
@@ -198,29 +174,52 @@ class AccumGradOptimizerAlt(ProxyOptimizer):
         #    raise RuntimeError("var_list can't be empty")
         #trainable_var += ops.get_collection(ops.GraphKeys._STREAMING_MODEL_PORTS)
 
-        # slots
-        accum_slots = self._create_accum_slots(trainable_var)
 
+        # Counter variable 
+        accum_times = self._niter
+        with tf.variable_scope(self._name, reuse=tf.AUTO_REUSE):
+            counter = tf.get_variable(initializer=tf.constant_initializer(0), name="counter", shape=[], trainable=False, dtype=tf.int32)
+
+        # ==================================
+        # Update counter lambda
+        def counter_add():
+          return tf.assign_add(counter, 1)
+        def counter_reset():
+          return tf.assign(counter, 1)
+        # ==================================
+
+        # Update op: is like as "counter = 1+(counter % accum_times-1)"
+        update_counter = tf.cond(tf.equal(counter, accum_times), counter_reset, counter_add, name='update_counter')
+
+        # If counter == 1, reset slots to zero
+        with tf.control_dependencies([update_counter]):
+            pred = tf.equal(counter, 1)
+
+        # ==================================
+        # Clear grads lambda
+        def grads_clear():
+            clear_ops = [tf.assign(s, tf.zeros_like(s)) for s in accum_grads]
+            return tf.group(*clear_ops, name='clear_grads')
+        # ===================================
+
+        # Create slots for storing accumulated gradients
+        with tf.variable_scope(self._name, reuse = tf.AUTO_REUSE):
+            accum_grads = [self._zeros_slot(v, "accum_grad", self._name) for v in  trainable_var]
+
+        # Clear slots if counter equal to 1, and only run after the update counter operation
+        with tf.control_dependencies([update_counter]):
+            cond_clear_grads = tf.cond(pred, grads_clear, tf.no_op, name='cond_clear_grads')
+
+        # Get gradients and weights from original Optimizer
         grads_and_vars = self._opt.compute_gradients(*args, **kwargs)
 
-        accum_grads = [tf.assign_add(s, tf.divide(g, self._niter)) for s, (g, _) in zip(accum_slots, grads_and_vars)]
-        return zip(accum_grads, trainable_var)
+        # Fetch gradients in grads_and_vars, and add them to accum_grads
+        # Thus, tuple those accum_grads with trainable_var
+        # It will compose of a list of all tuple(accum_grad, var)
+        with tf.control_dependencies([cond_clear_grads]):            
+            #return zip([tf.assign_add(s, g) for s, (g, _) in zip(accum_grads, grads_and_vars)], trainable_var)
+            return zip([tf.assign_add(s, tf.divide(g, accum_times)) for s, (g, _) in zip(accum_grads, grads_and_vars)], trainable_var)
 
-    #def apply_gradients(self, *args, **kwargs):
-    #    def update_grad():
-    #        update_op = self._opt.apply_gradients(*args, **kwargs)
-    #        return update_op
-
-    #    return tf.cond(self._pred, update_grad, tf.no_op, name='cond_apply_gradients')
-
-    def apply_gradients(self, *args, **kwargs):
-        with tf.name_scope('apply_gradients'):
-            # update weight
-            update_op = self._opt.apply_gradients(grads_and_vars, global_step)
-            with tf.control_dependencies([update_op]):
-                # clear slot
-                clear_ops = [tf.assign(s, tf.zeros_like(s)) for s in self._accum_slots]
-        return tf.group(*clear_ops, name='update_grad')
 
 class AccumGradOptimizer(ProxyOptimizer):
     """
