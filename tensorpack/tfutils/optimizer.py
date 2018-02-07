@@ -217,19 +217,29 @@ class AccumGradOptimizerAlt(ProxyOptimizer):
         with tf.control_dependencies([cond_clear_grads]):            
             return zip([tf.assign_add(s, g) for s, (g, _) in zip(accum_grads, grads_and_vars)], trainable_var)
 
-    def run_or_not(self, ok, no):
+    def run_or_not(self, fun, input):
 
-        def run():
-            return ok
-        def no_run():
-            return no
 
         with tf.variable_scope(self._name, reuse = True):
             counter = tf.get_variable(name="counter", dtype=tf.int32)
 
         accum_times = self._niter
-        with tf.control_dependencies([no]):
+
+        def flap(*a):
+            a=list(a);r=[];i=0
+            while -1<i<len(a):
+                if hasattr(a[i], '__iter__') and type(a[i])!=tf.Variable and type(a[i]) != tf.Tensor:a.extend(a[i])
+                else:r.append(a[i])
+                i+=1
+            return r
+
+        with tf.control_dependencies([flap(input)[0]]):
             pred = tf.equal(counter, accum_times)
+
+        def run():
+            return fun(input)
+        def no_run():
+            return input
 
         return tf.cond(pred, run, no_run)
 
@@ -244,7 +254,7 @@ class AccumGradOptimizerAlt(ProxyOptimizer):
 
         accum_times = self._niter
 
-        with tf.control_dependencies([g for g, _ in grads_and_vars]):
+        with tf.control_dependencies([grads_and_vars[0][0]]):
             pred = tf.equal(counter, accum_times)
 
         return tf.cond(pred, update_grad, tf.no_op, name='cond_apply_gradients')
