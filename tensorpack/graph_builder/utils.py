@@ -12,6 +12,7 @@ __all__ = ['LeastLoadedDeviceSetter',
            'OverrideCachingDevice',
            'override_to_local_variable',
            'allreduce_grads',
+           'allreduce_grads2',
            'average_grads']
 
 
@@ -80,6 +81,43 @@ class LeastLoadedDeviceSetter(object):
 
     def __str__(self):
         return "LeastLoadedDeviceSetter-{}".format(self.worker_device)
+
+def allreduce_grads2(all_grads):
+    """
+    All-reduce average the gradients among devices. Results are broadcasted to all devices.
+
+    Args:
+        all_grads (K x N x 2): A list of K lists. Each of the list is a list of N (grad, var) tuples.
+            The variables have to be the same across the K lists.
+
+    Returns:
+        (K x N x 2): same as input, but each grad is replaced by the average over K lists.
+    """
+    from tensorflow.contrib import nccl
+    nr_tower = len(all_grads)
+    if nr_tower == 1:
+        return all_grads
+    new_all_grads = []  # NVar * NGPU * 2
+    with tf.name_scope('AvgGrad'):
+        for grad_and_vars in zip(*all_grads):
+            #v = grad_and_vars[0][1]
+            grads = [g for g, _ in grad_and_vars]
+            summed = nccl.all_sum(grads)
+
+            grads_for_a_var = []
+            for (_, v), g in zip(grad_and_vars, summed):
+                with tf.device(g.device):
+                    g = tf.multiply(g, 1.0 / nr_tower)
+                    grads_for_a_var.append((g, v))
+            new_all_grads.append(grads_for_a_var)
+
+    # transpose
+    ret =  [list(k) for k in zip(*new_all_grads)]
+    
+  
+
+    return ret
+    #return new_all_grads
 
 
 def allreduce_grads(all_grads):
